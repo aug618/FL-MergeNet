@@ -1,0 +1,11 @@
+d_attention: 64
+h: 8
+num_layers: 2
+
+# 新增参数
+a_size_conv: [160, 960]     # MobileNetV2卷积层尺寸
+a_size_linear: [100, 1280]  # MobileNetV2线性层尺寸  
+b_size_linear: [100, 2048]  # ResNet50线性层尺寸
+f: 2                        # 更新频率
+lr: 0.001                   # 学习率
+mode: 5                     # 模式
