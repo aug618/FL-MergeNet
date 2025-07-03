@@ -228,7 +228,7 @@ def train_pure_federated(all_client_models, all_client_dataloaders, config):
             logger.info(f'Selected Clients Avg Training Loss: {avg_selected_client_loss:.6f}')
         
         # 评估所有客户端（每10个epoch评估一次以节省时间）
-        if epoch % 10 == 0 or epoch == EPOCH_NUM - 1:
+        if epoch % 2 == 0 or epoch == EPOCH_NUM - 1:
             # 评估所有客户端
             client_accs_top1 = []
             client_accs_top5 = []
@@ -373,7 +373,7 @@ def main():
 
         # 初始化SwanLab实验
         swanlab.init(
-            project="Pure-Federated-7-2",
+            project="Pure-Federated-7-3",
             experiment_name=f"pure_fed_50clients_freq_{j}_select_{NUM_SELECTED_CLIENTS}",
             description=f"纯联邦学习：50个客户端，每轮选择{NUM_SELECTED_CLIENTS}个，每{j}个batch进行联邦平均（无MergeNet）",
             config={
