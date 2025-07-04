@@ -305,7 +305,7 @@ def train_federated_mergenet_fixed(all_client_models, all_client_dataloaders, te
             tqdm.write(f'Selected Clients Avg Training Loss: {avg_selected_client_loss:.6f}')
             logger.info(f'Selected Clients Avg Training Loss: {avg_selected_client_loss:.6f}')
         
-        # 评估所有客户端（与pure_federated保持一致：每10个epoch评估一次）
+        # 评估所有客户端（与pure_federated保持一致：每2个epoch评估一次）
         if epoch % 2 == 0 or epoch == EPOCH_NUM - 1:
             # 评估所有客户端
             client_accs_top1 = []
