@@ -23,7 +23,7 @@ import swanlab
 
 LR = 0.001
 EPOCH_NUM = 200
-best_acc_mbv = 0.0  #############
+best_acc_mbv = 0.0  
 best_acc_res = 0.0 
 current_config = None
 def time_since(since):
@@ -60,7 +60,7 @@ def stats_params(model, weight_decay=5e-4):
     return param
 
 def hypernetwork_update(model, param, final_param, optimizer, lr_scheduler, epoch):
-    # print(param.size(), final_param.size())
+
     optimizer.zero_grad()
     delta_theta = param - final_param
     hn_grads = torch.autograd.grad(
@@ -70,8 +70,6 @@ def hypernetwork_update(model, param, final_param, optimizer, lr_scheduler, epoc
     # update hypernetwork weights
     for p, g in zip(model.parameters(), hn_grads):
         p.grad = g
-        # if g is None:
-        #     print(22222222222222, name)
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), 50)
     optimizer.step()
@@ -87,8 +85,7 @@ def train(mbv2, res, config):
     # 创建参数注意力模块 - 这是MergeNet的核心
     param_attention_l = ParamAttention(config, mode='a')
     param_attention_l.to(device)
-    # param_attention_r = ParamAttention(config, mode='b')
-    # param_attention_r.to(device)
+
     mbv2 = mbv2.to(device)
     res = res.to(device)
     f = config['f']
@@ -222,7 +219,6 @@ def train(mbv2, res, config):
 
                 # 记录所有重要指标
         swanlab.log({
-            
             # 训练损失
             "train_loss_mbv_avg": loss_train_ave1,
             "train_loss_res_avg": loss_train_ave2,
@@ -311,17 +307,6 @@ def main():
 
     #注意力机制参数文件
     config = yaml.load(open('config/param_attention_config.yaml', 'r'), Loader=yaml.Loader)
-
-    #     #设置swanlab记录
-    # swanlab.init(
-    #         # 设置项目
-    #         project="FL-Merget",
-    #         # 跟踪超参数与实验元数据
-    #         experiment_name="res50->mbv2",
-    #         description="ResNet50 向 MobileNetV2 传递知识",
-    #         config=config,
-    #     )
-
     logger.info(f'Linear -> Linear')
     
     start = time.time()

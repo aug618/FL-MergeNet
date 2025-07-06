@@ -21,15 +21,12 @@ from tqdm import tqdm
 import random
 import os
 import warnings
-import matplotlib.pyplot as plt
 import torch.optim as optim
 import numpy as np
-import math
 from dataset.cls_dataloader import train_dataloader, test_dataloader
 from dataset.federated_data_partition import create_federated_dataloaders, select_random_clients
 import logging
 import torch.nn as nn
-import torch.nn.functional as F
 from model.MobileNet_v2 import mobilenetv2
 from model.ResNet import resnet50
 from model.param_attention import ParamAttention
@@ -116,30 +113,6 @@ def federated_average_models(selected_client_models, device):
     
     return avg_state_dict
 
-def apply_mergenet_fusion(averaged_model, teacher_params, param_attention, device):
-    """简化的MergeNet知识融合"""
-    
-    # 提取平均模型的参数
-    param_a = {
-        'conv': averaged_model.stage6[2].residual[6].weight.data.clone().detach().requires_grad_(True).to(device),
-    }
-    
-    # 使用固定的teacher参数
-    param_b = {
-        'linear_weight': teacher_params.clone().detach().requires_grad_(True).to(device),
-    }
-    
-    # 使用参数注意力模块生成新参数
-    out_a = param_attention(param_a, param_b)
-    
-    # 更新平均模型的参数
-    new_param_dict = {
-        'stage6.2.residual.6.weight': out_a
-    }
-    averaged_model.load_state_dict(new_param_dict, strict=False)
-    
-    return out_a, averaged_model.stage6[2].residual[6].weight
-
 def train_federated_mergenet_fixed(all_client_models, all_client_dataloaders, teacher_params, config):
     """修复后的联邦学习 + MergeNet训练主函数"""
     global current_config, best_acc_clients
@@ -196,7 +169,6 @@ def train_federated_mergenet_fixed(all_client_models, all_client_dataloaders, te
         
         selected_client_models = [all_client_models[i] for i in selected_client_ids]
         selected_client_optimizers = [all_client_optimizers[i] for i in selected_client_ids]
-        selected_client_dataloaders = [all_client_dataloaders[i] for i in selected_client_ids]
         
         print(f'Epoch {epoch}: 选择客户端 {selected_client_ids[:5]}...等{len(selected_client_ids)}个')
         logger.info(f'Epoch {epoch}: 选择客户端 {selected_client_ids}')
@@ -222,34 +194,40 @@ def train_federated_mergenet_fixed(all_client_models, all_client_dataloaders, te
                             disable=False)
         
         for batch_idx in progress_bar:
-            # 每f个batch进行联邦平均和知识融合
-            if cnt % f == 0:
-                logger.info(f'Batch {cnt}: 开始联邦平均 + 知识融合 (选中{len(selected_client_ids)}个客户端)')
-                
-                # 1. 联邦平均（只对选中的客户端）
-                averaged_state_dict = federated_average_models(selected_client_models, device)
-                
-                # 创建临时的平均模型
-                averaged_model = mobilenetv2().to(device)
-                averaged_model.load_state_dict(averaged_state_dict)
-                
-                # 2. MergeNet知识融合（使用固定的teacher参数）
-                out_a, final_state = apply_mergenet_fusion(averaged_model, teacher_params, param_attention, device)
-                
-                # 3. 将融合后的参数分发给所有客户端（包括未选中的）
-                fused_state_dict = averaged_model.state_dict()
-                for client_model in all_client_models:  # 分发给所有客户端
-                    client_model.load_state_dict(fused_state_dict)
-                
-                # 4. 更新参数注意力模块
-                hypernetwork_update(param_attention, out_a, final_state, optimizer_atten, lr_scheduler_atten, epoch)
-                
-                logger.info(f'Batch {cnt}: 联邦平均 + 知识融合完成，参数已分发给所有{num_total_clients}个客户端')
-            
             # 选中的客户端使用各自的数据子集训练
             client_losses = []
             active_clients = 0
             
+            # 每f个batch进行联邦平均和知识融合（在客户端训练前）
+            if cnt % f == 0:
+                # 1. 先进行联邦平均
+                averaged_state_dict = federated_average_models(selected_client_models, device)
+                
+                if averaged_state_dict is not None and len(selected_client_models) > 0:
+                    # 2. 创建平均模型
+                    averaged_model = mobilenetv2().to(device)
+                    averaged_model.load_state_dict(averaged_state_dict)
+                    
+                    # 3. 使用参数注意力生成融合参数
+                    param_a = {
+                        'conv': averaged_model.stage6[2].residual[6].weight.data.clone().detach().requires_grad_(True).to(device),
+                    }
+                    param_b = {
+                        'linear_weight': teacher_params.clone().detach().requires_grad_(True).to(device),
+                    }
+                    out_a = param_attention(param_a, param_b)  # 参数注意力生成的融合参数
+                    
+                    # 4. 将融合参数只应用到选中的客户端（让选中的客户端用融合参数训练）
+                    fused_param_dict = {'stage6.2.residual.6.weight': out_a}
+                    for client_model in selected_client_models:
+                        client_model.load_state_dict(fused_param_dict, strict=False)
+                    
+                    # 5. 保存融合参数，用于后续的参数注意力更新
+                    fusion_generated_param = out_a.clone().detach().requires_grad_(True)
+                    
+                    logger.info(f'Batch {cnt}: 联邦平均 + 知识融合完成，融合参数已应用到{len(selected_client_ids)}个选中客户端')
+            
+            # 客户端使用融合后的参数进行训练
             for i, (client_idx, client_model, client_optimizer, client_iterator) in enumerate(
                 zip(selected_client_ids, selected_client_models, selected_client_optimizers, selected_client_iterators)
             ):
@@ -262,13 +240,41 @@ def train_federated_mergenet_fixed(all_client_models, all_client_dataloaders, te
                     loss_client = criterion(out_client, label_client)
                     loss_client.backward()
                     loss_total_selected_clients[i] += loss_client.item()
-                    client_optimizer.step()
+                    client_optimizer.step()  # ← 客户端用融合参数进行SGD训练
                     client_losses.append(loss_client.item())
                     active_clients += 1
                     
                 except StopIteration:
                     # 客户端数据用完，跳过该客户端
                     continue
+            
+            # 训练完成后，更新参数注意力模块并分发SGD后的参数
+            if cnt % f == 0 and 'fusion_generated_param' in locals():
+                # 7. 重新计算联邦平均（基于SGD训练后的选中客户端参数）
+                averaged_state_dict_post_sgd = federated_average_models(selected_client_models, device)
+                
+                if averaged_state_dict_post_sgd is not None:
+                    # 8. 创建SGD训练后的平均模型
+                    averaged_model_post_sgd = mobilenetv2().to(device)
+                    averaged_model_post_sgd.load_state_dict(averaged_state_dict_post_sgd)
+                    
+                    # 9. 获取SGD训练后的实际参数
+                    final_param_post_sgd = averaged_model_post_sgd.stage6[2].residual[6].weight.data.clone().detach().requires_grad_(True)
+                    
+                    # 10. 更新参数注意力模块（用SGD后的参数与之前生成的融合参数）
+                    hypernetwork_update(param_attention, 
+                                      fusion_generated_param,  # 之前生成的融合参数
+                                      final_param_post_sgd,    # SGD训练后的实际参数
+                                      optimizer_atten, lr_scheduler_atten, epoch)
+                    
+                    # 11. 将SGD训练后的参数分发给所有客户端（包括未选中的）
+                    for client_model in all_client_models:
+                        client_model.load_state_dict(averaged_state_dict_post_sgd)
+                    
+                    logger.info(f'Batch {cnt}: 参数注意力模块已更新，SGD后参数已分发给所有{num_total_clients}个客户端')
+                
+                # 清理临时变量
+                del fusion_generated_param
             
             cnt += 1
             
@@ -340,7 +346,6 @@ def train_federated_mergenet_fixed(all_client_models, all_client_dataloaders, te
                 'test/acc_all_clients_avg_top1': avg_acc_top1,
                 'test/acc_all_clients_max_top1': max_acc_top1,
                 'test/acc_all_clients_min_top1': min_acc_top1,
-                'test/acc_all_clients_avg_top5': np.mean(client_accs_top5),
             }
             
             swanlab.log(log_dict)
@@ -430,78 +435,103 @@ def main():
 
     global best_acc_clients
     
-    # 创建联邦数据划分（与pure_federated完全一致）
-    print("创建联邦数据划分...")
-    partitioner, client_dataloaders = create_federated_dataloaders(
-        dataset=train_dataloader.dataset,
-        num_clients=NUM_TOTAL_CLIENTS,
-        alpha=0.5,  # Dirichlet参数，控制数据异构程度
-        batch_size=train_dataloader.batch_size,
-        num_workers=2,
-        min_samples_per_client=50
-    )
+    # 测试不同alpha值的对比实验
+    alpha_values = [0.5, 10, 100]  # 不同的数据异构程度
     
-    # 打印数据分布统计
-    partitioner.print_statistics()
-    
-    # 创建固定的teacher参数（使用预训练ResNet50的参数）
-    print("创建固定的teacher参数...")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    teacher_model = resnet50().to(device)
-    teacher_params = teacher_model.fc.weight.data.clone().detach()
-    print(f"Teacher参数形状: {teacher_params.shape}")
-    
-    # 测试不同的参数组合
-    for j in [2]:  # f值（与pure_federated保持一致）
-        config['f'] = j
-        best_acc_clients = [0.] * NUM_TOTAL_CLIENTS
-
-        # 初始化SwanLab实验
-        swanlab.init(
-            project="Fixed-Federated-MergeNet-7-3",
-            experiment_name=f"fixed_fed_mergenet_50clients_freq_{j}_select_{NUM_SELECTED_CLIENTS}",
-            description=f"修复后的联邦MergeNet：50个客户端，每轮选择{NUM_SELECTED_CLIENTS}个，每{j}个batch进行联邦平均+知识融合",
-            config={
-                **config,
-                'num_total_clients': NUM_TOTAL_CLIENTS,
-                'num_selected_clients': NUM_SELECTED_CLIENTS,
-                'data_alpha': 0.5,
-                'min_samples_per_client': 50,
-                'merge_net': True,  # 标记这是带MergeNet的实验
-                'fixed_teacher': True,  # 使用固定teacher参数
-                'no_resnet_training': True,  # 不训练ResNet
-            },
+    for alpha in alpha_values:
+        print(f"\n{'='*60}")
+        print(f"开始 Alpha = {alpha} 的固定ResNet MergeNet实验")
+        print(f"{'='*60}")
+        logger.info(f"开始 Alpha = {alpha} 的固定ResNet MergeNet实验")
+        
+        # 创建联邦数据划分（与pure_federated完全一致）
+        print(f"创建联邦数据划分 (alpha={alpha})...")
+        partitioner, client_dataloaders = create_federated_dataloaders(
+            dataset=train_dataloader.dataset,
+            num_clients=NUM_TOTAL_CLIENTS,
+            alpha=alpha,  # Dirichlet参数，控制数据异构程度
+            batch_size=train_dataloader.batch_size,
+            num_workers=2,
+            min_samples_per_client=50
         )
         
-        # 创建50个客户端模型
-        print(f"创建{NUM_TOTAL_CLIENTS}个客户端模型...")
-        all_client_models = [mobilenetv2() for _ in range(NUM_TOTAL_CLIENTS)]
+        # 打印数据分布统计
+        partitioner.print_statistics()
         
-        print(f"总客户端数量: {NUM_TOTAL_CLIENTS}")
-        print(f"每轮选择客户端数: {NUM_SELECTED_CLIENTS}")
-        print(f"MobileNet v2 参数量: {sum(p.numel() for p in all_client_models[0].parameters()):,}")
-        print(f"联邦平均频率: 每{j}个batch")
-        print("注意: 本实验使用修复后的MergeNet知识融合")
+        # 创建固定的teacher参数（使用预训练ResNet50的参数）
+        print("创建固定的teacher参数...")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        teacher_model = resnet50().to(device)
+        teacher_params = teacher_model.fc.weight.data.clone().detach()
+        print(f"Teacher参数形状: {teacher_params.shape}")
         
-        logger.info(f'f:{j}, clients:{NUM_TOTAL_CLIENTS}, selected:{NUM_SELECTED_CLIENTS}, mergenet: fixed')
-        
-        # 开始训练
-        train_federated_mergenet_fixed(all_client_models, client_dataloaders, teacher_params, config)
+        # 测试不同的参数组合
+        for j in [2]:  # f值（与pure_federated保持一致）
+            config['f'] = j
+            best_acc_clients = [0.] * NUM_TOTAL_CLIENTS
 
-        # 实验结束
-        swanlab.finish()
+            # 初始化SwanLab实验
+            swanlab.init(
+                project="FL2Merget",
+                experiment_name=f"fixed_mergenet_alpha_{alpha}_freq_{j}_select_{NUM_SELECTED_CLIENTS}",
+                description=f"固定ResNet MergeNet对比实验：Alpha={alpha}, 50个客户端，每轮选择{NUM_SELECTED_CLIENTS}个，每{j}个batch进行联邦平均+知识融合",
+                config={
+                    **config,
+                    'num_total_clients': NUM_TOTAL_CLIENTS,
+                    'num_selected_clients': NUM_SELECTED_CLIENTS,
+                    'data_alpha': alpha,  # 记录当前alpha值
+                    'min_samples_per_client': 50,
+                    'merge_net': True,  # 标记这是带MergeNet的实验
+                    'fixed_teacher': True,  # 使用固定teacher参数
+                    'no_resnet_training': True,  # 不训练ResNet
+                },
+                )
+            
+            # 创建50个客户端模型
+            print(f"创建{NUM_TOTAL_CLIENTS}个客户端模型...")
+            all_client_models = [mobilenetv2() for _ in range(NUM_TOTAL_CLIENTS)]
+            
+            print(f"总客户端数量: {NUM_TOTAL_CLIENTS}")
+            print(f"每轮选择客户端数: {NUM_SELECTED_CLIENTS}")
+            print(f"数据异构程度 (Alpha): {alpha}")
+            print(f"MobileNet v2 参数量: {sum(p.numel() for p in all_client_models[0].parameters()):,}")
+            print(f"联邦平均频率: 每{j}个batch")
+            print("注意: 本实验使用修复后的MergeNet知识融合")
+            
+            logger.info(f'Alpha:{alpha}, f:{j}, clients:{NUM_TOTAL_CLIENTS}, selected:{NUM_SELECTED_CLIENTS}, mergenet: fixed')
+            
+            # 开始训练
+            train_federated_mergenet_fixed(all_client_models, client_dataloaders, teacher_params, config)
+
+            # 实验结束
+            swanlab.finish()
+            
+            print(f"\nAlpha = {alpha} 固定ResNet MergeNet实验完成")
+            print(f"前10个客户端最佳准确率: {[f'{acc:.4f}' for acc in best_acc_clients[:10]]}")
+            print(f"所有客户端平均最佳准确率: {np.mean(best_acc_clients):.4f}")
+            
+            logger.info(f"Alpha = {alpha} 实验完成，平均最佳准确率: {np.mean(best_acc_clients):.4f}")
         
         # 保存实验总结
         end_time = time.time()
         total_time = end_time - start
         
-        print(f"\\n=== 修复后的联邦MergeNet实验完成 ===")
+        print(f"\n=== Alpha = {alpha} 固定ResNet MergeNet实验完成 ===")
         print(f"总训练时间: {total_time/3600:.2f} 小时")
         print(f"前10个客户端最佳准确率: {[f'{acc:.4f}' for acc in best_acc_clients[:10]]}")
         print(f"所有客户端平均最佳准确率: {np.mean(best_acc_clients):.4f}")
         
-        logger.info(f"实验完成，总时间: {total_time/3600:.2f} 小时")
+        logger.info(f"Alpha = {alpha} 实验完成，总时间: {total_time/3600:.2f} 小时")
         logger.info(f"所有客户端平均最佳准确率: {np.mean(best_acc_clients):.4f}")
+    
+    # 所有alpha实验完成
+    final_end_time = time.time()
+    total_experiment_time = final_end_time - start
+    print(f"\n{'='*60}")
+    print(f"所有Alpha对比实验完成！")
+    print(f"总实验时间: {total_experiment_time/3600:.2f} 小时")
+    print(f"{'='*60}")
+    logger.info(f"所有Alpha对比实验完成，总时间: {total_experiment_time/3600:.2f} 小时")
 
 if __name__ == '__main__':
     main()

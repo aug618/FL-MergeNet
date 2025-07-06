@@ -10,15 +10,12 @@ from tqdm import tqdm
 import random
 import os
 import warnings
-import matplotlib.pyplot as plt
 import torch.optim as optim
 import numpy as np
-import math
 from dataset.cls_dataloader import train_dataloader, test_dataloader
 from dataset.federated_data_partition import create_federated_dataloaders, select_random_clients
 import logging
 import torch.nn as nn
-import torch.nn.functional as F
 from model.MobileNet_v2 import mobilenetv2
 from torch.optim.lr_scheduler import MultiStepLR
 
@@ -128,7 +125,6 @@ def train_pure_federated(all_client_models, all_client_dataloaders, config):
         
         selected_client_models = [all_client_models[i] for i in selected_client_ids]
         selected_client_optimizers = [all_client_optimizers[i] for i in selected_client_ids]
-        selected_client_dataloaders = [all_client_dataloaders[i] for i in selected_client_ids]
         
         print(f'Epoch {epoch}: 选择客户端 {selected_client_ids[:5]}...等{len(selected_client_ids)}个')
         logger.info(f'Epoch {epoch}: 选择客户端 {selected_client_ids}')
@@ -352,69 +348,94 @@ def main():
 
     global best_acc_clients
     
-    # 创建联邦数据划分（与federated_batch_mergenet.py完全一致）
-    print("创建联邦数据划分...")
-    partitioner, client_dataloaders = create_federated_dataloaders(
-        dataset=train_dataloader.dataset,
-        num_clients=NUM_TOTAL_CLIENTS,
-        alpha=0.5,  # Dirichlet参数，控制数据异构程度
-        batch_size=train_dataloader.batch_size,
-        num_workers=2,
-        min_samples_per_client=50
-    )
+    # 测试不同alpha值的对比实验
+    alpha_values = [0.5, 10, 100]  # 不同的数据异构程度
     
-    # 打印数据分布统计
-    partitioner.print_statistics()
-    
-    # 测试不同的参数组合
-    for j in [2]:  # f值（与federated_batch_mergenet.py保持一致）
-        config['f'] = j
-        best_acc_clients = [0.] * NUM_TOTAL_CLIENTS
-
-        # 初始化SwanLab实验
-        swanlab.init(
-            project="Pure-Federated-7-3",
-            experiment_name=f"pure_fed_50clients_freq_{j}_select_{NUM_SELECTED_CLIENTS}",
-            description=f"纯联邦学习：50个客户端，每轮选择{NUM_SELECTED_CLIENTS}个，每{j}个batch进行联邦平均（无MergeNet）",
-            config={
-                **config,
-                'num_total_clients': NUM_TOTAL_CLIENTS,
-                'num_selected_clients': NUM_SELECTED_CLIENTS,
-                'data_alpha': 0.5,
-                'min_samples_per_client': 50,
-                'merge_net': False  # 标记这是无MergeNet的实验
-            },
+    for alpha in alpha_values:
+        print(f"\n{'='*60}")
+        print(f"开始 Alpha = {alpha} 的实验")
+        print(f"{'='*60}")
+        logger.info(f"开始 Alpha = {alpha} 的纯联邦学习实验")
+        
+        # 创建联邦数据划分
+        print(f"创建联邦数据划分 (alpha={alpha})...")
+        partitioner, client_dataloaders = create_federated_dataloaders(
+            dataset=train_dataloader.dataset,
+            num_clients=NUM_TOTAL_CLIENTS,
+            alpha=alpha,  # Dirichlet参数，控制数据异构程度
+            batch_size=train_dataloader.batch_size,
+            num_workers=2,
+            min_samples_per_client=50
         )
         
-        # 创建50个客户端模型
-        print(f"创建{NUM_TOTAL_CLIENTS}个客户端模型...")
-        all_client_models = [mobilenetv2() for _ in range(NUM_TOTAL_CLIENTS)]
+        # 打印数据分布统计
+        partitioner.print_statistics()
         
-        print(f"总客户端数量: {NUM_TOTAL_CLIENTS}")
-        print(f"每轮选择客户端数: {NUM_SELECTED_CLIENTS}")
-        print(f"MobileNet v2 参数量: {sum(p.numel() for p in all_client_models[0].parameters()):,}")
-        print(f"联邦平均频率: 每{j}个batch")
-        print("注意: 本实验不使用MergeNet知识融合")
-        
-        logger.info(f'f:{j}, clients:{NUM_TOTAL_CLIENTS}, selected:{NUM_SELECTED_CLIENTS}, mergenet: False')
-        
-        # 开始训练
-        train_pure_federated(all_client_models, client_dataloaders, config)
+        # 测试不同的参数组合
+        for j in [2]:  # f值（与federated_batch_mergenet.py保持一致）
+            config['f'] = j
+            best_acc_clients = [0.] * NUM_TOTAL_CLIENTS
 
-        # 实验结束
-        swanlab.finish()
+            # 初始化SwanLab实验
+            swanlab.init(
+                project="FL2Merget",
+                experiment_name=f"pure_fed_alpha_{alpha}_freq_{j}_select_{NUM_SELECTED_CLIENTS}",
+                description=f"纯联邦学习对比实验：Alpha={alpha}, 50个客户端，每轮选择{NUM_SELECTED_CLIENTS}个，每{j}个batch进行联邦平均（无MergeNet）",
+                config={
+                    **config,
+                    'num_total_clients': NUM_TOTAL_CLIENTS,
+                    'num_selected_clients': NUM_SELECTED_CLIENTS,
+                    'data_alpha': alpha,  # 记录当前alpha值
+                    'min_samples_per_client': 50,
+                    'merge_net': False  # 标记这是无MergeNet的实验
+                },
+                )
+            
+            # 创建50个客户端模型
+            print(f"创建{NUM_TOTAL_CLIENTS}个客户端模型...")
+            all_client_models = [mobilenetv2() for _ in range(NUM_TOTAL_CLIENTS)]
+            
+            print(f"总客户端数量: {NUM_TOTAL_CLIENTS}")
+            print(f"每轮选择客户端数: {NUM_SELECTED_CLIENTS}")
+            print(f"数据异构程度 (Alpha): {alpha}")
+            print(f"MobileNet v2 参数量: {sum(p.numel() for p in all_client_models[0].parameters()):,}")
+            print(f"联邦平均频率: 每{j}个batch")
+            print("注意: 本实验不使用MergeNet知识融合")
+            
+            logger.info(f'Alpha:{alpha}, f:{j}, clients:{NUM_TOTAL_CLIENTS}, selected:{NUM_SELECTED_CLIENTS}, mergenet: False')
+            
+            # 开始训练
+            train_pure_federated(all_client_models, client_dataloaders, config)
+
+            # 实验结束
+            swanlab.finish()
+            
+            print(f"\nAlpha = {alpha} 实验完成")
+            print(f"前10个客户端最佳准确率: {[f'{acc:.4f}' for acc in best_acc_clients[:10]]}")
+            print(f"所有客户端平均最佳准确率: {np.mean(best_acc_clients):.4f}")
+            
+            logger.info(f"Alpha = {alpha} 实验完成，平均最佳准确率: {np.mean(best_acc_clients):.4f}")
         
         # 保存实验总结
         end_time = time.time()
         total_time = end_time - start
         
-        print(f"\n=== 纯联邦学习实验完成 ===")
+        print(f"\n=== Alpha = {alpha} 纯联邦学习实验完成 ===")
         print(f"总训练时间: {total_time/3600:.2f} 小时")
         print(f"前10个客户端最佳准确率: {[f'{acc:.4f}' for acc in best_acc_clients[:10]]}")
         print(f"所有客户端平均最佳准确率: {np.mean(best_acc_clients):.4f}")
         
-        logger.info(f"实验完成，总时间: {total_time/3600:.2f} 小时")
+        logger.info(f"Alpha = {alpha} 实验完成，总时间: {total_time/3600:.2f} 小时")
         logger.info(f"所有客户端平均最佳准确率: {np.mean(best_acc_clients):.4f}")
+    
+    # 所有alpha实验完成
+    final_end_time = time.time()
+    total_experiment_time = final_end_time - start
+    print(f"\n{'='*60}")
+    print(f"所有Alpha对比实验完成！")
+    print(f"总实验时间: {total_experiment_time/3600:.2f} 小时")
+    print(f"{'='*60}")
+    logger.info(f"所有Alpha对比实验完成，总时间: {total_experiment_time/3600:.2f} 小时")
 
 if __name__ == '__main__':
     main()
