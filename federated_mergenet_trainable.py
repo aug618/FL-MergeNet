@@ -358,14 +358,14 @@ def train_federated_mergenet_trainable(all_client_models, all_client_dataloaders
             
             swanlab.log({
                 # 训练损失
-                "train/loss_clients_avg": loss_total_clients / max(1, batch_idx + 1),
+                "train/loss_selected_clients_avg": loss_total_clients / max(1, batch_idx + 1),
                 "train/loss_resnet_avg": avg_resnet_loss,
                 # ResNet准确率
                 "test/acc_resnet_top1": resnet_acc,
                 "test/acc_resnet_top5": resnet_acc5,
                 # 客户端平均准确率
-                "test/acc_clients_avg_top1": avg_client_acc,
-                "test/acc_clients_avg_top5": avg_client_acc5,
+                "test/acc_all_clients_avg_top1": avg_client_acc,
+                "test/acc_all_clients_avg_top5": avg_client_acc5,
                 # 最佳准确率
                 "test/best_acc_resnet": best_acc_resnet,
                 "test/best_acc_clients_avg": sum(best_acc_clients) / len(best_acc_clients),
@@ -415,7 +415,15 @@ def test_model(model, device, model_name):
     
     # 保存最佳模型
     if 'Client' in model_name:
-        client_id = int(model_name.split('_')[1])
+        # 处理 "Client_{i}" 和 "Final_Client_{i}" 两种格式
+        parts = model_name.split('_')
+        if len(parts) >= 3 and parts[0] == "Final":
+            # "Final_Client_{i}" 格式
+            client_id = int(parts[2])
+        else:
+            # "Client_{i}" 格式
+            client_id = int(parts[1])
+        
         if final_top1_acc > best_acc_clients[client_id] * 100:
             best_acc_clients[client_id] = final_top1_acc / 100
             torch.save(model.state_dict(), f'checkpoints/federated_mergenet_trainable_best_client_{client_id}.pth')
@@ -429,7 +437,14 @@ def test_model(model, device, model_name):
     
     # 记录详细的测试统计信息
     if 'Client' in model_name:
-        client_id = int(model_name.split('_')[1])
+        # 处理 "Client_{i}" 和 "Final_Client_{i}" 两种格式
+        parts = model_name.split('_')
+        if len(parts) >= 3 and parts[0] == "Final":
+            # "Final_Client_{i}" 格式
+            client_id = int(parts[2])
+        else:
+            # "Client_{i}" 格式
+            client_id = int(parts[1])
         best_acc_value = best_acc_clients[client_id] * 100
     else:
         best_acc_value = best_acc_resnet * 100
@@ -507,7 +522,7 @@ def main():
             # 为当前参数组合创建SwanLab实验
             swanlab.init(
                 project="FL2Merget",
-                experiment_name=f"trainable_mergenet_alpha_{alpha}_freq_{j}",
+                experiment_name=f"Trainable_resnet_alpha_{alpha}_freq_{j}",
                 description=f"可训练ResNet MergeNet对比实验：Alpha={alpha}, 联邦学习 + MergeNet (可训练ResNet), 联邦平均频率: {j}",
                 config={
                     "experiment_type": "federated_mergenet_trainable",
